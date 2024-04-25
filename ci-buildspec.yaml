@@ -1,0 +1,53 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - echo Installing dependencies
+      - yum install -y jq  # Ensure jq is installed for JSON processing
+  pre_build:
+    commands:
+      # Configure Git for CodeCommit
+      - git config --global credential.helper '!aws codecommit credential-helper $@'
+      - git config --global credential.UseHttpPath true
+      - git config --global user.email "xyz@gmail.com"
+      - git config --global user.name "xyz"
+      - git clone <code-commit-url>
+
+      
+      # Clone your CodeCommit repository
+      # Make sure to replace 'your-repo-name' with your actual CodeCommit repository name
+      # and 'your-region' with the AWS region your CodeCommit repository is hosted in
+    
+      - cd datapipes-poc
+      
+      # Create a new branch
+      - git checkout -b dev-$FILE_NAME
+  build:
+    commands:
+      # Variables BUCKET_NAME and FILE_NAME are passed from Lambda
+      - echo "Downloading file from S3"
+      - aws s3 cp s3://$BUCKET_NAME/$FILE_NAME .
+
+      # File processing steps remain unchanged
+      - filename=$(basename $FILE_NAME)
+      - exportType=$(jq -r '.export_type' "$filename")
+      - |
+        if [[ "$exportType" == "SOURCE" ]]; then
+          mv $filename source/
+          git add source/$filename
+          TARGET_DIR="source"
+        elif [[ "$exportType" == "PIPELINE" ]]; then
+          mv $filename pipeline/
+          git add pipeline/$filename
+          TARGET_DIR="pipeline"
+        else
+          echo "Unsupported export_type: $exportType"
+          exit 1
+        fi
+      - git commit -m "Moving $filename to $TARGET_DIR based on export_type"
+      - git push --set-upstream origin dev-$FILE_NAME
+  post_build:
+    commands:
+      - >
+        aws codecommit create-pull-request --title "Update: $FILE_NAME" --description "Automated PR to add $FILE_NAME" --client-request-token $(date +%s) --targets repositoryName=datapipes-poc,sourceReference=dev-$FILE_NAME,destinationReference=main
