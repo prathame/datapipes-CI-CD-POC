@@ -1,0 +1,74 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.x
+    commands:
+      - echo Installing jq
+      - yum install -y jq
+  pre_build:
+    commands:
+      - echo "Retrieving secrets from AWS Secrets Manager"
+      - SECRET_STRING=$(aws secretsmanager get-secret-value --secret-id myApp/configValues --query SecretString --output text)
+      - echo Checking out the main branch
+      - git config --global credential.helper '!aws codecommit credential-helper $@'
+      - git config --global credential.UseHttpPath true
+      - git config --global user.email "prathamesh.busa@ollion.com"
+      - git config --global user.name "prathame"
+      - git clone https://git-codecommit.ap-southeast-1.amazonaws.com/v1/repos/datapipes-poc
+      - cd datapipes-poc
+      - git checkout main
+      - git pull origin main
+  build:
+    commands:
+      - echo Finding the JSON file and uploading to S3
+      - FILE_TO_UPLOAD=$(git diff --name-only HEAD^ HEAD | grep '\.json$')
+      - echo "$FILE_TO_UPLOAD"
+      - currentdir=$(pwd)
+      - tempFilename="${currentdir}/tmp_$FILE_TO_UPLOAD"
+      - exportType=$(jq -r '.export_type' "$FILE_TO_UPLOAD")
+      - echo "$exportType"
+      - echo "Processing $FILE_TO_UPLOAD..."
+      - sourceName=$(jq -r '.source_name' "$FILE_TO_UPLOAD")
+      - | 
+          if [[ "$exportType" == "SOURCE" ]]; then
+          echo "$SECRET_STRING" | jq -r --arg sn "$sourceName" '.[$sn][] | @base64' | while IFS= read -r encodedLine; do
+            decodedLine=$(echo $encodedLine | base64 --decode)
+            updatePath=$(echo $decodedLine | jq -r '.path')
+            updateValue=$(echo $decodedLine | jq -r '.value')
+
+            # Convert dot notation path to array format for jq
+            pathAsArray=$(echo $updatePath | jq -R 'split(".")')
+            
+            # Apply the update using jq setpath and output to the temporary file
+            jq --argjson path "$pathAsArray" --arg val "$updateValue" 'setpath($path; $val)' "$FILE_TO_UPLOAD" > "$tempFilename"
+            if [ $? -eq 0 ]; then
+              mv "$tempFilename" "$FILE_TO_UPLOAD"
+              echo "Updated $updatePath to $updateValue."
+            else
+              echo "Failed to update $updatePath."
+            fi
+          done
+          else
+          echo "Skipping update, export_type is not SOURCE."
+          fi
+
+      - |
+        filename=$(basename $FILE_NAME)
+        if [[ "$exportType" == "SOURCE" ]]; then
+          S3_UPLOAD_PATH="s3://cc-datapipes-test-apse1-ingestor-raw/datapipes/export/source/$filename"
+        elif [[ "$exportType" == "PIPELINE" ]]; then
+          S3_UPLOAD_PATH="s3://cc-datapipes-test-apse1-ingestor-raw/datapipes/export/pipeline/$filename"
+        else
+          echo "Invalid or unsupported export_type: $exportType"
+          exit 1
+        fi
+              
+      - echo "Uploading $FILE_TO_UPLOAD to $S3_UPLOAD_PATH"
+      - aws s3 cp $FILE_TO_UPLOAD $S3_UPLOAD_PATH
+
+      - echo "Invoking Lambda function"
+      - aws lambda invoke --function-name post_upload_s3 --payload '{}' output.txt
+      - cat output.txt
+      - rm output.txt
