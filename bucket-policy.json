@@ -1,0 +1,18 @@
+{
+    "Version": "2012-10-17",
+    "Id": "Policy1713161095746",
+    "Statement": [
+        {
+            "Sid": "Stmt1713161093361",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "<ARN of source account user say root>"
+            },
+            "Action": "s3:PutObject",
+            "Resource": [
+                "arn:aws:s3::<destination bucket>",
+                "arn:aws:s3:::<destination bucket>/*"
+            ]
+        }
+    ]
+}
